@@ -62,6 +62,7 @@ You can pass full URLs — `https://reddit.com/r/whatever` gets cleaned to `redd
 - The service **starts automatically on boot** — survives reboots
 - All destructive actions (unblock, disable, stop, remove) require the master password
 - The config file (`config.json`) is **HMAC-signed** — if someone edits it directly (changing domains, disabling blocking, etc.), the signature breaks and the service **ignores the tampered config**, continuing to enforce the last trusted state
+- A **signed shadow backup** (`.trusted_state`) preserves the block list — deleting `config.json` won't help, the service restores from the backup on restart
 - Failed password attempts are logged in `C:\ProgramData\SuperBlocker\events.log`
 
 ## Risks and warnings
