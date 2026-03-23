@@ -43,6 +43,7 @@ SERVICE_DESC = "Monitors and enforces website blocking via the hosts file."
 
 CONFIG_DIR = Path(os.environ.get("PROGRAMDATA", r"C:\ProgramData")) / "SuperBlocker"
 CONFIG_FILE = CONFIG_DIR / "config.json"
+SHADOW_FILE = CONFIG_DIR / ".trusted_state"
 LOG_FILE = CONFIG_DIR / "events.log"
 HOSTS_FILE = Path(r"C:\Windows\System32\drivers\etc\hosts")
 
@@ -130,13 +131,58 @@ def verify_config_signature(cfg):
 
 
 def save_config(cfg):
-    """Sign and persist config to disk."""
+    """Sign and persist config to disk. Also updates the shadow backup."""
     cfg["signature"] = sign_config(cfg)
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     tmp = CONFIG_FILE.with_suffix(".tmp")
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(cfg, f, indent=2)
     tmp.replace(CONFIG_FILE)
+    # Update shadow backup whenever we write a legitimately signed config
+    if cfg.get("password") and cfg["domains"]:
+        _save_shadow(cfg)
+
+
+def _save_shadow(cfg):
+    """Persist a signed shadow copy of the trusted state.
+
+    This survives config deletion — the service falls back to it on restart.
+    """
+    try:
+        payload = json.dumps(
+            {
+                "domains": sorted(cfg["domains"]),
+                "enabled": cfg["enabled"],
+                "password": cfg["password"],
+            },
+            sort_keys=True,
+        )
+        sig = hmac.new(
+            cfg["password"]["hash"].encode(), payload.encode(), hashlib.sha256
+        ).hexdigest()
+        with open(SHADOW_FILE, "w", encoding="utf-8") as f:
+            json.dump({"payload": payload, "sig": sig}, f)
+    except Exception:
+        pass
+
+
+def _load_shadow():
+    """Load and verify the shadow backup. Returns (domains, enabled) or None."""
+    try:
+        with open(SHADOW_FILE, "r", encoding="utf-8") as f:
+            wrapper = json.load(f)
+        payload_str = wrapper["payload"]
+        payload = json.loads(payload_str)
+        expected = hmac.new(
+            payload["password"]["hash"].encode(),
+            payload_str.encode(),
+            hashlib.sha256,
+        ).hexdigest()
+        if hmac.compare_digest(expected, wrapper["sig"]):
+            return payload["domains"], payload["enabled"]
+    except Exception:
+        pass
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -335,8 +381,15 @@ if HAS_WIN32:
             # Re-apply blocks one last time so they persist while stopped
             try:
                 cfg = load_config()
-                if cfg["enabled"] and cfg["domains"]:
+                if verify_config_signature(cfg) and cfg["enabled"] and cfg["domains"]:
                     apply_blocks(cfg["domains"])
+                else:
+                    # Config might be tampered — use shadow backup
+                    shadow = _load_shadow()
+                    if shadow:
+                        domains, enabled = shadow
+                        if enabled and domains:
+                            apply_blocks(domains)
             except Exception:
                 pass
             log_event("Service stopped")
@@ -360,12 +413,18 @@ if HAS_WIN32:
             trusted_domains = []
             trusted_enabled = True
 
+            # Try main config first, fall back to shadow backup
             cfg = load_config()
-            if verify_config_signature(cfg):
+            if verify_config_signature(cfg) and cfg.get("password"):
                 trusted_domains = list(cfg["domains"])
                 trusted_enabled = cfg["enabled"]
             else:
-                log_event("Initial config signature invalid — using empty state")
+                shadow = _load_shadow()
+                if shadow:
+                    trusted_domains, trusted_enabled = shadow
+                    log_event("Config missing/invalid — restored from shadow backup")
+                else:
+                    log_event("No valid config or shadow backup found")
 
             while True:
                 rc = win32event.WaitForSingleObject(self.stop_event, 5000)
@@ -373,11 +432,14 @@ if HAS_WIN32:
                     break
                 try:
                     cfg = load_config()
-                    if verify_config_signature(cfg):
+                    if verify_config_signature(cfg) and cfg.get("password"):
                         # Config is authentic — accept the update
                         trusted_domains = list(cfg["domains"])
                         trusted_enabled = cfg["enabled"]
-                    else:
+                    elif not cfg.get("password") and trusted_domains:
+                        # Config was deleted/reset — ignore and keep trusted state
+                        log_event("Config deleted — ignoring, using cached/shadow state")
+                    elif cfg.get("password"):
                         log_event("Config tampering detected — ignoring, using cached config")
 
                     if trusted_enabled and trusted_domains:
