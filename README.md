@@ -61,6 +61,7 @@ You can pass full URLs — `https://reddit.com/r/whatever` gets cleaned to `redd
 - If the service process is killed, Windows **automatically restarts it** (recovery actions: 3s, 5s, 10s)
 - The service **starts automatically on boot** — survives reboots
 - All destructive actions (unblock, disable, stop, remove) require the master password
+- The config file (`config.json`) is **HMAC-signed** — if someone edits it directly (changing domains, disabling blocking, etc.), the signature breaks and the service **ignores the tampered config**, continuing to enforce the last trusted state
 - Failed password attempts are logged in `C:\ProgramData\SuperBlocker\events.log`
 
 ## Risks and warnings

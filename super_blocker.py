@@ -12,6 +12,7 @@ import sys
 import os
 import json
 import hashlib
+import hmac
 import secrets
 import getpass
 import time
@@ -108,8 +109,29 @@ def load_config():
     return dict(DEFAULT_CONFIG)
 
 
+def sign_config(cfg):
+    """Compute an HMAC over critical config fields using the password hash as key."""
+    if not cfg.get("password"):
+        return ""
+    key = cfg["password"]["hash"].encode()
+    payload = json.dumps(
+        {"enabled": cfg["enabled"], "domains": sorted(cfg["domains"])},
+        sort_keys=True,
+    ).encode()
+    return hmac.new(key, payload, hashlib.sha256).hexdigest()
+
+
+def verify_config_signature(cfg):
+    """Return True if the config signature is valid (not tampered)."""
+    if not cfg.get("password"):
+        return True  # No password set yet — nothing to verify
+    expected = sign_config(cfg)
+    return hmac.compare_digest(cfg.get("signature", ""), expected)
+
+
 def save_config(cfg):
-    """Persist config to disk."""
+    """Sign and persist config to disk."""
+    cfg["signature"] = sign_config(cfg)
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     tmp = CONFIG_FILE.with_suffix(".tmp")
     with open(tmp, "w", encoding="utf-8") as f:
@@ -334,18 +356,42 @@ if HAS_WIN32:
 
         def _run_loop(self):
             """Main enforcement loop — checks every 5 seconds."""
+            # Cache the last verified-good config so tampering can't disable us
+            trusted_domains = []
+            trusted_enabled = True
+
+            cfg = load_config()
+            if verify_config_signature(cfg):
+                trusted_domains = list(cfg["domains"])
+                trusted_enabled = cfg["enabled"]
+            else:
+                log_event("Initial config signature invalid — using empty state")
+
             while True:
                 rc = win32event.WaitForSingleObject(self.stop_event, 5000)
                 if rc == win32event.WAIT_OBJECT_0:
                     break
                 try:
                     cfg = load_config()
-                    if cfg["enabled"] and cfg["domains"]:
-                        if not blocks_in_place(cfg["domains"]):
-                            log_event("Tampering detected — re-applying blocks")
-                            apply_blocks(cfg["domains"])
+                    if verify_config_signature(cfg):
+                        # Config is authentic — accept the update
+                        trusted_domains = list(cfg["domains"])
+                        trusted_enabled = cfg["enabled"]
+                    else:
+                        log_event("Config tampering detected — ignoring, using cached config")
+
+                    if trusted_enabled and trusted_domains:
+                        if not blocks_in_place(trusted_domains):
+                            log_event("Hosts file tampering detected — re-applying blocks")
+                            apply_blocks(trusted_domains)
                 except Exception as exc:
                     log_event(f"Enforcement error: {exc}")
+                    # On error, still try to enforce with last trusted config
+                    if trusted_enabled and trusted_domains:
+                        try:
+                            apply_blocks(trusted_domains)
+                        except Exception:
+                            pass
 
 
 # ---------------------------------------------------------------------------
