@@ -18,6 +18,7 @@ import getpass
 import time
 import subprocess
 import ctypes
+import atexit
 from pathlib import Path
 from datetime import datetime
 
@@ -183,6 +184,81 @@ def _load_shadow():
     except Exception:
         pass
     return None
+
+
+# ---------------------------------------------------------------------------
+# ACL lockdown
+# ---------------------------------------------------------------------------
+
+_config_was_locked = False
+
+
+def _lockdown_config_dir():
+    """Set SYSTEM-only ACLs and hide the config directory."""
+    d = str(CONFIG_DIR)
+    if not CONFIG_DIR.exists():
+        return
+    # Remove inherited ACLs
+    subprocess.run(
+        ["icacls", d, "/inheritance:r", "/T", "/Q"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    # Strip access from everyone except SYSTEM
+    for principal in [
+        "BUILTIN\\Administrators", "BUILTIN\\Users", "Everyone", "CREATOR OWNER",
+    ]:
+        subprocess.run(
+            ["icacls", d, "/remove:g", principal, "/T", "/Q"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+    # Grant SYSTEM full control (inheritable to files + subdirs)
+    subprocess.run(
+        ["icacls", d, "/grant", "NT AUTHORITY\\SYSTEM:(OI)(CI)F", "/T", "/Q"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    # Hide the directory in Explorer
+    subprocess.run(
+        ["attrib", "+h", "+s", d],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+
+
+def _unlock_config_dir():
+    """Temporarily grant Administrators access to the config directory."""
+    d = str(CONFIG_DIR)
+    if not CONFIG_DIR.exists():
+        return
+    # Take ownership (admin privilege allows this even without ACL access)
+    subprocess.run(
+        ["takeown", "/f", d, "/r", "/d", "y"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    # Grant Administrators full control
+    subprocess.run(
+        ["icacls", d, "/grant", "BUILTIN\\Administrators:(OI)(CI)F", "/T", "/Q"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    # Unhide so file operations work normally
+    subprocess.run(
+        ["attrib", "-h", "-s", d],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+
+
+def ensure_config_access():
+    """If config dir is ACL-locked, unlock it for this CLI session and re-lock on exit."""
+    global _config_was_locked
+    if _config_was_locked:
+        return  # Already unlocked this session
+    try:
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        probe = CONFIG_DIR / ".access_probe"
+        probe.write_text("t")
+        probe.unlink()
+    except PermissionError:
+        _unlock_config_dir()
+        _config_was_locked = True
+        atexit.register(_lockdown_config_dir)
 
 
 # ---------------------------------------------------------------------------
@@ -764,6 +840,20 @@ def cmd_disable():
     print("[i] The service (if running) will NOT re-apply until you 'enable' again.")
 
 
+def cmd_lockdown():
+    """Apply ACL lockdown to the config directory."""
+    require_admin()
+    if not CONFIG_DIR.exists():
+        print("[!] Config directory does not exist yet. Run 'set-password' or 'block' first.")
+        return
+    _lockdown_config_dir()
+    log_event("ACL lockdown applied to config directory")
+    print("[+] Config directory locked down to SYSTEM-only access.")
+    print(f"    {CONFIG_DIR}")
+    print("[i] The directory is now hidden and only the SYSTEM account can access it.")
+    print("[i] CLI commands will auto-unlock/re-lock as needed (transparent to you).")
+
+
 # ---------------------------------------------------------------------------
 # Usage & main
 # ---------------------------------------------------------------------------
@@ -787,6 +877,7 @@ Usage: python super_blocker.py <command> [arguments]
 
   enable                    Enable blocking
   disable                   Disable blocking             (PASSWORD REQUIRED)
+  lockdown                  Lock config directory (SYSTEM-only ACL)
 
 Examples:
   python super_blocker.py set-password
@@ -818,6 +909,7 @@ COMMANDS = {
     "stop":         cmd_stop,
     "enable":       cmd_enable,
     "disable":      cmd_disable,
+    "lockdown":     cmd_lockdown,
     "help":         lambda: print(USAGE),
 }
 
@@ -826,6 +918,9 @@ def main():
     if len(sys.argv) < 2:
         print(USAGE)
         return
+
+    # If config dir is ACL-locked, transparently unlock for this session
+    ensure_config_access()
 
     cmd = sys.argv[1].lower().lstrip("-")
     handler = COMMANDS.get(cmd)

@@ -52,6 +52,7 @@ Done. Close the terminal. The service runs independently.
 | `stop` | Stop the service | **Yes** |
 | `enable` | Enable blocking | No |
 | `disable` | Disable all blocking | **Yes** |
+| `lockdown` | Lock config directory (SYSTEM-only ACL) | No |
 
 You can pass full URLs — `https://reddit.com/r/whatever` gets cleaned to `reddit.com` automatically. Each blocked domain also blocks its `www.` variant.
 
@@ -63,6 +64,7 @@ You can pass full URLs — `https://reddit.com/r/whatever` gets cleaned to `redd
 - All destructive actions (unblock, disable, stop, remove) require the master password
 - The config file (`config.json`) is **HMAC-signed** — if someone edits it directly (changing domains, disabling blocking, etc.), the signature breaks and the service **ignores the tampered config**, continuing to enforce the last trusted state
 - A **signed shadow backup** (`.trusted_state`) preserves the block list — deleting `config.json` won't help, the service restores from the backup on restart
+- Optional **ACL lockdown** (`lockdown` command) restricts the config directory to SYSTEM-only — the folder becomes hidden and inaccessible even to admin users. The CLI auto-unlocks/re-locks transparently when you run commands
 - Failed password attempts are logged in `C:\ProgramData\SuperBlocker\events.log`
 
 ## Risks and warnings
@@ -75,7 +77,7 @@ If you set a password you don't remember, you **cannot** unblock sites, disable 
 
 1. Boot into **Safe Mode** (services don't run in Safe Mode)
 2. Edit `C:\Windows\System32\drivers\etc\hosts` — delete everything between the `SUPER BLOCKER START` and `SUPER BLOCKER END` markers
-3. Delete `C:\ProgramData\SuperBlocker\config.json` to reset the password
+3. Delete everything in `C:\ProgramData\SuperBlocker\` (includes `config.json` and `.trusted_state`)
 4. Reboot normally
 
 ### Hosts file modification
